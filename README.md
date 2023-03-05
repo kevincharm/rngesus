@@ -2,7 +2,7 @@
 
 RNGesus is a DRAND oracle. Consuming contracts may request a random beacon from the future. A random beacon can be proved by anyone who can supply a valid SNARK proof of verification of the BLS signature for that round.
 
-This project uses BLS12-381 verification circuits from [0xPARC's circom-pairing](https://github.com/yi-sun/circom-pairing) project to (somewhat) efficiently perform BLS12-381 signature verification on the EVM.
+This project uses BLS12-381 verification circuits from [0xPARC's circom-pairing](https://github.com/yi-sun/circom-pairing) ([forked here](https://github.com/kevincharm/circom-pairing)) project to (somewhat) efficiently perform BLS12-381 signature verification on the EVM.
 
 Many optimisations can be made including adding a hash_to_field verification circuit so that this expensive operation does not need to be done in Solidity (would save ~850k gas).
 
@@ -33,4 +33,28 @@ contract Consumer is IRandomnessReceiver {
     }
 }
 
+```
+
+## Development
+
+This project makes use of git submodules, which need to be initialised:
+
+```sh
+git submodule init
+git submodule update
+```
+
+To install dependencies:
+
+```sh
+# Make sure yarn is installed
+npm install -g yarn
+# Install dependencies
+yarn
+```
+
+Running tests:
+
+```sh
+yarn test
 ```
