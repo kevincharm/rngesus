@@ -2,7 +2,6 @@
 pragma solidity 0.8.17;
 
 import {BLSSNARKVerifier} from "./BLSSNARKVerifier.sol";
-import {BufferSlice} from "./utils/BufferSlice.sol";
 import {BigNumbers, BigNumber} from "../vendor/solidity-BigNumber/src/BigNumbers.sol";
 import {IRNGesus} from "./interfaces/IRNGesus.sol";
 import {IRandomnessReceiver} from "./interfaces/IRandomnessReceiver.sol";
@@ -11,8 +10,6 @@ import {IRandomnessReceiver} from "./interfaces/IRandomnessReceiver.sol";
 /// @author kevincharm
 contract RNGesus is IRNGesus {
     using BigNumbers for BigNumber;
-    using BufferSlice for bytes;
-    using BufferSlice for BufferSlice.Slice;
 
     struct SNARKProof {
         uint[2] a;
