@@ -86,16 +86,12 @@ const config: HardhatUserConfig = {
     paths: {
         storageLayouts: '.storage-layouts',
     },
-    storageLayoutChanges: {
-        contracts: ['LensClub', 'LensClubChef'],
-        fullPath: false,
-    },
     abiExporter: {
         path: './exported/abi',
         runOnCompile: true,
         clear: true,
         flat: true,
-        only: ['ILensClubChef', 'LensClub', 'LensClubChef'],
+        only: ['RNGesus'],
         except: ['test/*'],
     },
 }
