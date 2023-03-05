@@ -1,3 +1,7 @@
+```diff
+-PROOF OF CONCEPT // 3AM YOLO PUSH // UNOPTIMISED // UNAUDITED // DO NOT USE IN PROD // ET CETERA
+```
+
 # RNGesus
 
 RNGesus is a DRAND oracle. Consuming contracts may request a random beacon from the future. A random beacon can be proved by anyone who can supply a valid SNARK proof of verification of the BLS signature for that round.
