@@ -64,6 +64,31 @@ const config: HardhatUserConfig = {
             chainId: 137,
             accounts: [process.env.MAINNET_PK as string],
         },
+        scrollAlpha: {
+            url: 'https://alpha-rpc.scroll.io/l2',
+            chainId: 534353,
+            accounts: [process.env.MAINNET_PK as string],
+        },
+        baseGoerli: {
+            url: 'https://goerli.base.org',
+            chainId: 84531,
+            accounts: [process.env.MAINNET_PK as string],
+        },
+        auroraTestnet: {
+            url: 'https://testnet.aurora.dev',
+            chainId: 1313161555,
+            accounts: [process.env.MAINNET_PK as string],
+        },
+        filHyperspace: {
+            url: 'https://rpc.ankr.com/filecoin_testnet',
+            chainId: 3141,
+            accounts: [process.env.MAINNET_PK as string],
+        },
+        mantleTestnet: {
+            url: 'https://rpc.testnet.mantle.xyz',
+            chainId: 5001,
+            accounts: [process.env.MAINNET_PK as string],
+        },
     },
     gasReporter: {
         enabled: true,

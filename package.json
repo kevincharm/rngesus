@@ -3,6 +3,11 @@
   "version": "1.0.0",
   "description": "",
   "scripts": {
+    "deploy:scroll-alpha": "yarn hardhat --network scrollAlpha run scripts/deploy.ts",
+    "deploy:base-goerli": "yarn hardhat --network baseGoerli run scripts/deploy.ts",
+    "deploy:aurora-testnet": "yarn hardhat --network auroraTestnet run scripts/deploy.ts",
+    "deploy:fil-hyperspace": "yarn hardhat --network filHyperspace run scripts/deploy.ts",
+    "deploy:mantle-testnet": "yarn hardhat --network mantleTestnet run scripts/deploy.ts",
     "clean": "yarn hardhat clean && rm -rf ./artifacts && rm -rf ./cache",
     "test": "TS_NODE_CACHE=false yarn hardhat --network hardhat test",
     "build": "yarn hardhat compile"
