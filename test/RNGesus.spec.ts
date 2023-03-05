@@ -48,14 +48,23 @@ describe('RNGesus', () => {
         )
     })
 
-    it('should run happy path', async () => {
+    it('should verify & record a beacon proof', async () => {
         const [a, b, c] = encodeGroth16ProofArgs(proof as IGroth16Proof, inputs)
-        expect(
-            await rngesus.verifyBeaconProof(round, sig55x7, Hm55x7, {
-                a,
-                b,
-                c,
-            })
-        ).to.eq(true)
+        await rngesus.recordBeaconProof(round, sig55x7, Hm55x7, {
+            a,
+            b,
+            c,
+        })
+
+        // gas
+        await deployer
+            .sendTransaction(
+                await rngesus.populateTransaction.verifyBeaconProof(round, sig55x7, Hm55x7, {
+                    a,
+                    b,
+                    c,
+                })
+            )
+            .then((tx) => tx.wait(1))
     })
 })

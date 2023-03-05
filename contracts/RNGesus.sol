@@ -1,15 +1,15 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: UNLICENSED
 pragma solidity 0.8.17;
 
 import {BLSSNARKVerifier} from "./BLSSNARKVerifier.sol";
 import {BufferSlice} from "./utils/BufferSlice.sol";
 import {BigNumbers, BigNumber} from "../vendor/solidity-BigNumber/src/BigNumbers.sol";
-
-import "hardhat/console.sol";
+import {IRNGesus} from "./interfaces/IRNGesus.sol";
+import {IRandomnessReceiver} from "./interfaces/IRandomnessReceiver.sol";
 
 /// @title RNGesus: A drand oracle
 /// @author kevincharm
-contract RNGesus {
+contract RNGesus is IRNGesus {
     using BigNumbers for BigNumber;
     using BufferSlice for bytes;
     using BufferSlice for BufferSlice.Slice;
@@ -29,10 +29,19 @@ contract RNGesus {
     uint64 public immutable period;
 
     /// @notice Randomness values that have been previously proven
-    mapping(uint64 => uint256) private randomness;
+    mapping(uint64 => uint256) public randomness;
 
+    /// @notice What rounds are currently pending
+    uint64[] public pendingRounds;
+    /// @notice round => requestId;
+    mapping(uint64 => uint256[]) private requestIdsInRound;
+    /// @notice Request ID => callback contract
+    mapping(uint256 => address) private requests;
+    event RandomnessRequestReceived();
+
+    /// @notice BLS12-381 field size
     bytes public constant P =
-        hex"1a0111ea397fe69a4b1ba7b6434bacd764774b84f38512bf6730d2a0f6b0f6241eabfffeb153ffffb9feffffffffaaab" /** field size */;
+        hex"1a0111ea397fe69a4b1ba7b6434bacd764774b84f38512bf6730d2a0f6b0f6241eabfffeb153ffffb9feffffffffaaab";
 
     uint256 public nextRequestId;
 
@@ -73,6 +82,9 @@ contract RNGesus {
         return (a + b - 1) / b;
     }
 
+    /// @notice Convert integer to octet stream
+    /// @param value Integer to convert
+    /// @param length Byte-length of integer
     function i2osp(
         uint256 value,
         uint256 length
@@ -85,7 +97,36 @@ contract RNGesus {
         return res;
     }
 
-    /// @notice Perform base % mod using the modexp precompile with exp=1
+    /// @notice (base ** exp) % modulus using precompile
+    function modexp(
+        bytes memory base,
+        bytes memory exp,
+        bytes memory modulus
+    ) internal view returns (bool success, bytes memory output) {
+        bytes memory input = abi.encodePacked(
+            uint256(base.length),
+            uint256(exp.length),
+            uint256(modulus.length),
+            base,
+            exp,
+            modulus
+        );
+
+        output = new bytes(modulus.length);
+
+        assembly {
+            success := staticcall(
+                gas(),
+                5,
+                add(input, 32),
+                mload(input),
+                add(output, 32),
+                mload(modulus)
+            )
+        }
+    }
+
+    /// @notice base % P where P is BLS12-381 field size
     function modP(
         bytes memory base
     ) internal view returns (bool success, bytes memory output) {
@@ -114,7 +155,11 @@ contract RNGesus {
         }
     }
 
-    function expand_message_xmd(
+    /// @notice Produce uniformly random byte string from `message` using SHA256
+    /// @param message Message to expand
+    /// @param DST Domain separation tag
+    /// @param lenInBytes Length of desired byte string
+    function expandMessageXMD(
         bytes memory message,
         bytes memory DST,
         uint256 lenInBytes
@@ -123,10 +168,11 @@ contract RNGesus {
         uint256 r_in_bytes = b_in_bytes * 2;
         uint256 ell = ceilDiv(lenInBytes, b_in_bytes);
         require(ell <= 255, "Invalid xmd length");
-        bytes memory DST_prime = abi.encodePacked(DST, i2osp(DST.length, 1));
+        bytes memory DST_prime = abi.encodePacked(DST, i2osp(DST.length, 1)); // CORRECT
+        // ---------------------------------------
         bytes memory Z_pad = i2osp(0, r_in_bytes);
         bytes memory l_i_b_str = i2osp(lenInBytes, 2);
-        bytes32[] memory b = new bytes32[](ell);
+        bytes32[] memory b = new bytes32[](ell + 1);
         bytes32 b_0 = sha256(
             abi.encodePacked(Z_pad, message, l_i_b_str, i2osp(0, 1), DST_prime)
         );
@@ -136,45 +182,44 @@ contract RNGesus {
                 abi.encodePacked(b_0 ^ b[i - 1], i2osp(i + 1, 1), DST_prime)
             );
         }
-        // TODO: Optimise
-        bytes memory pseudo_random_bytes;
-        for (uint256 i; i < lenInBytes; ++i) {
+        // ---------------------------------------
+        bytes memory pseudo_random_bytes = abi.encodePacked(b[0]);
+        for (
+            uint256 i = 1;
+            i < lenInBytes / 32 /** each b[i] is bytes32 */;
+            ++i
+        ) {
             pseudo_random_bytes = abi.encodePacked(pseudo_random_bytes, b[i]);
         }
         return pseudo_random_bytes;
     }
 
+    /// @notice SHA-256 an arbitrary `message` to BLS field
+    /// @param message Message to hash
+    /// @param count Number of Fp2[Re,Im] elements to produce
     function hashToField(
         bytes memory message,
         uint256 count
     ) internal view returns (bytes[][] memory) {
-        // uint256 log2p = 381;
-        // uint256 k = 128; // target security level
-        // uint256 m = 2; // extension degree of F, m >= 1
-        uint256 L = ceilDiv(381 + 128, 8); // section 5.1 of ietf draft link above
-        bytes memory pseudo_random_bytes = expand_message_xmd(
+        uint256 L = 64;
+        bytes memory pseudo_random_bytes = expandMessageXMD(
             message,
             "BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_",
             count * 2 * L
         );
         bytes[][] memory u = new bytes[][](count);
         bytes[] memory e;
-        uint256 i;
-        uint256 j;
-        uint256 t;
-        bytes memory tv;
-        uint256 elm_offset;
-        bool success;
-        bytes memory out;
-        for (i = 0; i < count; ++i) {
+        for (uint256 i; i < count; ++i) {
             e = new bytes[](2);
-            for (j = 0; j < 2; ++j) {
-                elm_offset = L * (j + i * 2);
-                tv = new bytes(L);
-                for (t = 0; t < L; ++t) {
+            for (uint256 j; j < 2; ++j) {
+                uint256 elm_offset = L * (j + i * 2);
+                bytes memory tv = new bytes(L);
+                for (uint256 t; t < L; ++t) {
                     tv[t] = pseudo_random_bytes[elm_offset + t];
                 }
-                (success, out) = modP(tv /** TODO: Proper endianness? */);
+                (bool success, bytes memory out) = modP(
+                    tv /** TODO: Proper endianness? */
+                );
                 require(success, "modP failed");
                 e[j] = out;
             }
@@ -183,37 +228,40 @@ contract RNGesus {
         return u;
     }
 
-    /// @notice Convert arbitrary bigint to 55x7
-    function bigint_to_array(
-        uint256 x
-    ) internal pure returns (uint256[] memory) {
-        uint256 mod = 2 ** 55;
-        uint256 k = 7;
-        uint256[] memory ret = new uint256[](k);
-        uint256 x_temp = x;
-        for (uint256 i; i < k; ++i) {
-            ret[i] = (x_temp % mod);
-            x_temp = x_temp / mod;
-        }
-        return ret;
-    }
-
     /// @notice 55x7 to big-endian
-    function array_to_bigint(
+    /// A = 2^0 * a[0]
+    ///     + 2^n * a[1]
+    ///     + ...
+    ///     + 2^{n(k-1)} * a[k-1]
+    function arrayToBigInt(
         uint256[7] memory arr
     ) internal view returns (bytes memory) {
         BigNumber memory sum = BigNumbers.zero();
-        for (uint256 i = 0; i < 7; --i) {
-            uint256 v = arr[i] * 2 ** (55 * (i));
-            sum = sum.add(BigNumbers.init(v, false));
+        for (uint256 i = 0; i < 7; ++i) {
+            (bool success, bytes memory exp) = modexp(
+                hex"02",
+                abi.encodePacked(uint16(55 * i)) /** dec55 */,
+                P
+            );
+            require(success, "modexp55 failed");
+            BigNumber memory v = BigNumbers.init(arr[i], false).mul(
+                BigNumbers.init(exp, false)
+            );
+            sum = sum.add(v);
         }
         return sum.val;
     }
 
+    /// @notice Verify random beacon SNARK proof
+    /// @param round Random beacon round, will be verified against proof
+    /// @param signature Signature of round in 55x7 representation
+    /// @param Hm sha256(round), hashed to the BLS field, in 55x7 representation
+    /// @param proof SNARK proof, proving BLS verification of signature and Hm
+    ///     against known public key
     function verifyBeaconProof(
         uint64 round,
-        uint256[7][2][2] calldata signature /** from public.json */,
-        uint256[7][2][2] calldata Hm /** hashed to field */,
+        uint256[7][2][2] calldata signature,
+        uint256[7][2][2] calldata Hm,
         SNARKProof calldata proof
     ) public view returns (bool) {
         // The structure of the public inputs to the SNARK proof is as follows.
@@ -227,7 +275,6 @@ contract RNGesus {
         for (uint256 i; i < 2; ++i) {
             for (uint256 k; k < 7; ++k) {
                 input[offset] = publicKey[i][k];
-                console.log("[%d] %d", offset, input[offset]);
                 ++offset;
             }
         }
@@ -238,7 +285,6 @@ contract RNGesus {
                 for (uint256 k; k < 7; ++k) {
                     // TODO: Check if this corresponds to public.json flattening
                     input[offset] = signature[i][j][k];
-                    console.log("[%d] %d", offset, input[offset]);
                     ++offset;
                 }
             }
@@ -250,32 +296,43 @@ contract RNGesus {
                 for (uint256 k; k < 7; ++k) {
                     // TODO: Check if this corresponds to public.json flattening
                     input[offset] = Hm[i][j][k];
-                    console.log("[%d] %d", offset, input[offset]);
                     ++offset;
                 }
             }
         }
 
-        // // Last part is H(m), which is the message, hashed to the field P where
-        // // message := sha256(bytes(uint64(round)))
-        // bytes memory message = abi.encodePacked(
-        //     sha256(abi.encodePacked(uint64(round)))
-        // );
-        // // H(m) := hash_to_field(message)
-        // bytes[][] memory Hm = hashToField(message, 2);
-        // // H(m) is in [[f_0, f_1], [f_0, f_1]] format
-        // // SNARK inputs are in 55x7 format
-        // for (uint256 i; i < 2; ++i) {
-        //     for (uint256 j; j < 2; ++j) {
-        //         uint256[7] memory f;
-        //         for (uint256 k; k < 7; ++k) {
-        //             f[k] = input[offset + k];
-        //             ++offset;
-        //         }
-        //         bytes memory h = array_to_bigint(f);
-        //         require(keccak256(Hm[i][j]) == keccak256(h), "Invalid Hm");
-        //     }
-        // }
+        // 4. Verify H(m) == H_c(m) [computed from `round`]
+        // TODO: The SNARK proof can include a `hash_to_field` verification circuit
+        // Last part is H(m), which is the message, hashed to the field P where
+        // message := sha256(bytes(uint64(round)))
+        bytes memory message = abi.encodePacked(
+            sha256(abi.encodePacked(uint64(round)))
+        );
+        bytes[][] memory computedHm = hashToField(message, 2);
+        // -----------------------------------------------------
+        // computedHm is in [[f_0, f_1], [f_0, f_1]] format
+        // each f is 48B
+        // SNARK inputs are in 55x7 format
+        // -> Convert SNARK inputs from 55x7 to [Fp2, Fp2]
+        for (uint256 i; i < 2; ++i) {
+            for (uint256 j; j < 2; ++j) {
+                uint256[7] memory arr;
+                for (uint256 k; k < 7; ++k) {
+                    arr[k] = Hm[i][j][k];
+                }
+                bytes memory fp = arrayToBigInt(arr);
+                uint256 off = fp.length - 48;
+                bytes memory f48 = new bytes(48);
+                // TODO: Optimise
+                for (uint256 x; x < 48; ++x) {
+                    f48[x] = fp[off + x];
+                }
+                require(
+                    keccak256(computedHm[i][j]) == keccak256(f48),
+                    "Invalid signed H(m)"
+                );
+            }
+        }
         return
             BLSSNARKVerifier(blsSNARKVerifier).verifyProof(
                 proof.a,
@@ -285,7 +342,12 @@ contract RNGesus {
             );
     }
 
-    /// @param signature flattened 2x2x7 sig
+    /// @notice Record new random beacon given the SNARK proof is valid
+    /// @param round Random beacon round, will be verified against proof
+    /// @param signature Signature of round in 55x7 representation
+    /// @param Hm sha256(round), hashed to the BLS field, in 55x7 representation
+    /// @param proof SNARK proof, proving BLS verification of signature and Hm
+    ///     against known public key
     function recordBeaconProof(
         uint64 round,
         uint256[7][2][2] calldata signature,
@@ -306,14 +368,9 @@ contract RNGesus {
         randomness[round] = uint256(sha256(abi.encodePacked(signature)));
     }
 
-    /// @notice What rounds are currently pending
-    uint64[] private rounds;
-    /// @notice round => requestId;
-    mapping(uint64 => uint256[]) private requestIdsInRound;
-    /// @notice Request ID => callback contract
-    mapping(uint256 => address) private requests;
-    event RandomnessRequestReceived();
-
+    /// @notice Request a random beacon after a specified timestamp
+    /// @param deadline Timestamp after which a random beacon will be proven
+    /// @return request ID
     function requestRandomness(
         uint256 deadline
     ) external payable returns (uint256) {
@@ -335,16 +392,14 @@ contract RNGesus {
         return rid;
     }
 
-    function checkUpkeep() external view returns (uint64) {
-        if (rounds.length == 0) {
-            return 0;
-        }
-
-        return rounds[0];
+    /// @notice (Keeper function) check if there are pending rounds to fulfill
+    function checkUpkeep() external view returns (bool) {
+        return pendingRounds.length != 0;
     }
 
-    // TODO: Gas limits
-    function fulfillRequests(uint64 round, uint256 amount) external {
+    /// @notice (Keeper function) fulfill requests once rounds are proven
+    function fulfillRequests(uint256 roundIndex, uint256 amount) external {
+        uint64 round = pendingRounds[roundIndex];
         uint256 rand = randomness[round];
         require(rand == 0, "Round doesn't exist");
 
@@ -353,14 +408,20 @@ contract RNGesus {
 
         uint256 limit = amount < length ? amount : length;
         for (uint256 i; i < limit; ++i) {
+            uint256 rLen = requestIdsInRound[round].length;
             uint256 reqId = requestIdsInRound[round][i];
+            // Remove request ID from round
+            requestIdsInRound[round][i] = requestIdsInRound[round][rLen - 1];
+            requestIdsInRound[round].pop();
+            // Fulfill request
             address requester = requests[reqId];
             // TODO: try/catch (??)
             IRandomnessReceiver(requester).receiveRandomness(reqId, rand);
         }
+        if (requestIdsInRound[round].length == 0) {
+            // No more requests for round - all fulfilled
+            pendingRounds[roundIndex] = pendingRounds[roundIndex - 1];
+            pendingRounds.pop();
+        }
     }
-}
-
-interface IRandomnessReceiver {
-    function receiveRandomness(uint256 requestId, uint256 randomness) external;
 }
